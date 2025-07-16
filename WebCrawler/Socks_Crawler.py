@@ -43,6 +43,7 @@ if __name__ == "__main__":
     urls_to_crawl = [
         "https://example.com",
         "https://httpbin.org/ip",
+        "https://crawler-test.com/content/word_count_100_words"
         # Add more URLs here
     ]
     crawl(urls_to_crawl)

@@ -10,6 +10,7 @@ print("[DEBUG] Using httpx version:", httpx.__version__)
 print("[DEBUG] httpx module loaded from:", httpx.__file__)
 import random
 import requests
+import socket
 import time
 from bs4 import BeautifulSoup
 
@@ -41,7 +42,8 @@ HEADERS_POOL = [
 URLS_TO_CRAWL = [
     "https://example.com",
     "https://httpbin.org/ip",
-    "https://httpbin.org/headers"
+    "https://httpbin.org/headers",
+    "http://quotes.toscrape.com"
 ]
 
 
@@ -101,7 +103,9 @@ async def fetch(url: str, theproxy: str, headers: dict):
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
             title = soup.title.string.strip() if soup.title else "No title found"
-            print(f"{url} | Proxy: {theproxy} | Title: {title}")
+            quotes = soup.find_all('span', {'class': 'text'})
+            authors = soup.find_all('small', {'class':'author'})
+            print(f"{url} | Proxy: {theproxy} | Title: {title} | Authors: {len(authors)}")
     except Exception as e:
         print(f"Failed to fetch {url} via {theproxy}: {e}")
 
@@ -122,5 +126,9 @@ async def crawl(urls: list):
 # ==================== ENTRY POINT ====================
 
 if __name__ == "__main__":
+    hostname = socket.gethostname()
+    ip_address = socket.gethostbyname(hostname)
+    print(f"Your Local IP Address is: {ip_address}")
+
     asyncio.run(crawl(URLS_TO_CRAWL))
 
