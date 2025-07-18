@@ -14,7 +14,17 @@ import socket
 import time
 from bs4 import BeautifulSoup
 
+#Selenium imports for browser automation
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import WebDriverException
+import numpy as np
+
 # ==================== CONFIG ====================
+SELENIUM_CRAWL = False # Swap between httpx and Selenium. If you want to use Selenium, set this to True, otherwise False for httpx
+
 # List of proxies (SOCKS5)
 PROXIES = ["socks5h://127.0.0.1:9050"]#fetch_proxies()
  
@@ -46,6 +56,7 @@ URLS_TO_CRAWL = [
     "http://quotes.toscrape.com"
 ]
 
+CHROME_DRIVER_PATH = "C:\\Repos\\chromedriver-win64\\chromedriver.exe"  #TODO: You got to Change this path to location of install
 
 # ==================== UTILITIES ====================
 
@@ -94,7 +105,41 @@ async def get_working_proxies() -> list:
     results = await asyncio.gather(*tasks)
     return [PROXIES[i] for i, ok in enumerate(results) if ok]
 
+def create_browser(proxy, user_agent):
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument(f"user-agent={user_agent}")
+    chrome_options.add_argument(f"--proxy-server=socks5://{proxy}")
+
+    try:
+        driver = webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=chrome_options)
+        return driver
+    except WebDriverException as e:
+        print(f"Failed to launch Chrome with proxy {proxy}: {e}")
+        return None
+    
+def selenium_delay(mean=3.0, stddev=1.0):
+    delay = max(0.5, np.random.normal(mean, stddev))
+    print(f"⏳ Delay: {delay:.2f}s")
+    time.sleep(delay)
+
 # ==================== CORE CRAWLER ====================
+
+def selenium_crawl(url, proxy, user_agent):
+    driver = create_browser(proxy, user_agent)
+    if not driver:
+        return
+
+    try:
+        driver.get(url)
+        time.sleep(2)
+        title = driver.title
+        print(f"[{proxy}] {url} -> Title: {title}")
+    except Exception as e:
+        print(f"Error fetching {url} with {proxy}: {e}")
+    finally:
+        driver.quit()
 
 async def fetch(url: str, theproxy: str, headers: dict):
     try:
@@ -118,8 +163,13 @@ async def crawl(urls: list):
     for url in urls:
         proxy = random.choice(working_proxies)
         headers = random.choice(HEADERS_POOL)
-        await fetch(url, proxy, headers)
-        await gaussian_delay()
+        #SELENIUM_CRAWL = True  # Set to True to use Selenium, False for httpx
+        if SELENIUM_CRAWL:
+            selenium_crawl(url, proxy, headers["User-Agent"])
+            selenium_delay()
+        else:
+            await fetch(url, proxy, headers)
+            await gaussian_delay()
 
 
 
