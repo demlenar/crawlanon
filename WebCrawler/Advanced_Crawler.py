@@ -12,9 +12,16 @@ import random
 import requests
 import socket
 import time
+import json
+from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 #print("[DEBUG] Using httpx version:", httpx.__version__)
 #print("[DEBUG] httpx module loaded from:", httpx.__file__)
+
+#Circuit rotation
+from stem import Signal
+from stem.control import Controller
 
 #Selenium imports for browser automation
 from selenium import webdriver
@@ -27,6 +34,9 @@ import numpy as np
 # ==================== CONFIG ====================
 # Swap between httpx and Selenium. If you want to use Selenium, set this to True, otherwise False for httpx
 SELENIUM_CRAWL = False 
+
+# Maximum number of retries for failed requests
+MAX_RETRIES = 3
 
 # List of proxies (SOCKS5)
 PROXIES = ["socks5h://127.0.0.1:9050"]#fetch_proxies()
@@ -53,9 +63,10 @@ HEADERS_POOL = [
 # Target URLs to crawl
 URLS_TO_CRAWL = [
     "https://example.com",
-    "https://httpbin.org/ip",
-    "https://httpbin.org/headers",
-    "http://quotes.toscrape.com"
+    "https://httpbin.org",
+    "https://www.bbc.com",
+    "http://quotes.toscrape.com",
+    "https://www.wikipedia.org"
 ]
 
 CHROME_DRIVER_PATH = "C:\\Repos\\chromedriver-win64\\chromedriver.exe"  #This is machine dependent!! Change this path to location of install
@@ -166,9 +177,30 @@ def selenium_delay(mean=3.0, stddev=1.0):
     print(f"Delay: {delay:.2f}s")
     time.sleep(delay)
 
+def rotate_tor_circuit(self) -> bool:
+    """
+    Rotate the Tor circuit by sending a NEWNYM signal to the Tor control port.
+        
+    Returns:
+        bool: True if rotation was successful, False otherwise.
+    """
+    try:
+        with Controller.from_port(port=self.config.tor_control_port) as controller:
+            if self.config.tor_control_password:
+                controller.authenticate(password=self.config.tor_control_password)
+            else:
+                controller.authenticate()
+            controller.signal(Signal.NEWNYM)
+            time.sleep(10)  # Wait for new circuit to stabilize (Tor's minimum)
+            print("Successfully rotated Tor circuit")
+            return True
+    except Exception as e:
+        print(f"Failed to rotate Tor circuit: {str(e)}")
+        return False
+
 # ==================== CORE CRAWLER ====================
 
-def selenium_crawl(url, proxy, user_agent):
+def selenium_crawl(url, proxy, user_agent)-> Optional[Dict]:
     """
     Uses Selenium to load a full webpage through a SOCKS5 proxy and scrape its title.
     Can be extended to extract dynamic JavaScript-rendered content.
@@ -183,15 +215,77 @@ def selenium_crawl(url, proxy, user_agent):
 
     try:
         driver.get(url)
-        time.sleep(2)
+        time.sleep(2)# Wait for page load
         title = driver.title
-        print(f"[{proxy}] {url} -> Title: {title}")
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        quotes = soup.find_all('span', {'class': 'text'})
+        authors = soup.find_all('small', {'class': 'author'})
+            
+        # New fields
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+                
+        # Meta tags
+        meta_description = soup.find('meta', attrs={'name': 'description'})
+        meta_description = meta_description['content'] if meta_description and 'content' in meta_description.attrs else None
+        meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
+        meta_keywords = meta_keywords['content'] if meta_keywords and 'content' in meta_keywords.attrs else None
+                
+        # Links
+        links = soup.find_all('a', href=True)
+        internal_links = [link['href'] for link in links if urlparse(link['href']).netloc == domain]
+        external_links = [link['href'] for link in links if urlparse(link['href']).netloc and urlparse(link['href']).netloc != domain]
+                
+        # Images
+        images = [{'src': img.get('src'), 'alt': img.get('alt')} for img in soup.find_all('img') if img.get('src')]
+                
+        # Headings
+        headings = []
+        for tag in ['h1', 'h2', 'h3']:
+            headings.extend([h.get_text(strip=True) for h in soup.find_all(tag)])
+                
+        # Paragraphs
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if p.get_text(strip=True)]
+                
+        # Social media metadata
+        og_data = {meta['property']: meta['content'] for meta in soup.find_all('meta', property=True) if 'content' in meta.attrs}
+        twitter_data = {meta['name']: meta['content'] for meta in soup.find_all('meta', attrs={'name': lambda x: x and x.startswith('twitter:')}) if 'content' in meta.attrs}
+                
+        # Page stats
+        html_size = len(str(soup).encode('utf-8'))
+        visible_text = soup.get_text(strip=True)
+        word_count = len(visible_text.split())
+                
+        # Scripts
+        scripts = [script.get('src') or script.get_text(strip=True) for script in soup.find_all('script')]
+                
+        result = {
+                    'url': url,
+                    'title': title,
+                    'quotes_count': len(quotes),
+                    'authors_count': len(authors),
+                    'meta_description': meta_description,
+                    'meta_keywords': meta_keywords,
+                    'internal_links': internal_links,
+                    'external_links': external_links,
+                    'images': images,
+                    'headings': headings,
+                    'paragraphs': paragraphs,
+                    'og_data': og_data,
+                    'twitter_data': twitter_data,
+                    'html_size': html_size,
+                    'word_count': word_count,
+                    'scripts': scripts
+        }
+        print(f"Successfully fetched {url} | Proxy: {proxy} | Title: {title}")
+        return result
     except Exception as e:
-        print(f"Error fetching {url} with {proxy}: {e}")
+        print(f"Error fetching {url} with proxy {proxy}: {str(e)}")
+        return None
     finally:
         driver.quit()
 
-async def fetch(url: str, theproxy: str, headers: dict):
+async def fetch(url: str, theproxy: str, headers: dict, attempt: int = 0) -> Optional[Dict]:
     """
     Sends an HTTP GET request through a proxy with randomized headers using httpx (async).
     Extracts page title and number of quote/author elements (for demo purposes).
@@ -208,9 +302,74 @@ async def fetch(url: str, theproxy: str, headers: dict):
             title = soup.title.string.strip() if soup.title else "No title found"
             quotes = soup.find_all('span', {'class': 'text'})
             authors = soup.find_all('small', {'class':'author'})
-            print(f"{url} | Proxy: {theproxy} | Title: {title} | Authors: {len(authors)}")
+
+            # New fields
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+                
+            # Meta tags
+            meta_description = soup.find('meta', attrs={'name': 'description'})
+            meta_description = meta_description['content'] if meta_description and 'content' in meta_description.attrs else None
+            meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
+            meta_keywords = meta_keywords['content'] if meta_keywords and 'content' in meta_keywords.attrs else None
+                
+            # Links
+            links = soup.find_all('a', href=True)
+            internal_links = [link['href'] for link in links if urlparse(link['href']).netloc == domain]
+            external_links = [link['href'] for link in links if urlparse(link['href']).netloc and urlparse(link['href']).netloc != domain]
+                
+            # Images
+            images = [{'src': img.get('src'), 'alt': img.get('alt')} for img in soup.find_all('img') if img.get('src')]
+                
+            # Headings
+            headings = []
+            for tag in ['h1', 'h2', 'h3']:
+                headings.extend([h.get_text(strip=True) for h in soup.find_all(tag)])
+                
+            # Paragraphs
+            paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if p.get_text(strip=True)]
+                
+            # Social media metadata
+            og_data = {meta['property']: meta['content'] for meta in soup.find_all('meta', property=True) if 'content' in meta.attrs}
+            twitter_data = {meta['name']: meta['content'] for meta in soup.find_all('meta', attrs={'name': lambda x: x and x.startswith('twitter:')}) if 'content' in meta.attrs}
+                
+            # Page stats
+            html_size = len(str(soup).encode('utf-8'))
+            visible_text = soup.get_text(strip=True)
+            word_count = len(visible_text.split())
+                
+            # Scripts
+            scripts = [script.get('src') or script.get_text(strip=True) for script in soup.find_all('script')]
+                
+            result = {
+                    'url': url,
+                    'title': title,
+                    'quotes_count': len(quotes),
+                    'authors_count': len(authors),
+                    'status': r.status_code,
+                    'meta_description': meta_description,
+                    'meta_keywords': meta_keywords,
+                    'internal_links': internal_links,
+                    'external_links': external_links,
+                    'images': images,
+                    'headings': headings,
+                    'paragraphs': paragraphs,
+                    'og_data': og_data,
+                    'twitter_data': twitter_data,
+                    'html_size': html_size,
+                    'word_count': word_count,
+                    'scripts': scripts
+            }
+
+            print(f"Successfully fetched {url} | Proxy: {theproxy} | Title: {title}")
+            return result
     except Exception as e:
-        print(f"Failed to fetch {url} via {theproxy}: {e}")
+        if attempt < MAX_RETRIES:
+            print(f"Retrying {url} with proxy {theproxy} due to error: {e}")
+            await gaussian_delay()
+            return await fetch(url, theproxy, headers, attempt + 1)
+        print(f"Failed to fetch {url} after {MAX_RETRIES} via {theproxy}: {e}")
+        return None
 
 async def crawl(urls: list):
     """
@@ -220,21 +379,31 @@ async def crawl(urls: list):
     Args:
         urls (list): List of target URLs to process.
     """
+    results = []
     working_proxies = await get_working_proxies()
     if not working_proxies:
         print("No working proxies found.")
         return
 
     for url in urls:
+        # Rotate Tor circuit for each URL
+        #rotate_tor_circuit()  
+
         proxy = random.choice(working_proxies)
         headers = random.choice(HEADERS_POOL)
         #SELENIUM_CRAWL = True  # Set to True to use Selenium, False for httpx
         if SELENIUM_CRAWL:
-            selenium_crawl(url, proxy, headers["User-Agent"])
+            result = selenium_crawl(url, proxy, headers["User-Agent"])
             selenium_delay()
         else:
-            await fetch(url, proxy, headers)
+            result = await fetch(url, proxy, headers)
             await gaussian_delay()
+        if result:
+            results.append(result)
+
+    with open('crawl_results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+    print(f"Saved {len(results)} results to crawl_results.json")
 
 
 
