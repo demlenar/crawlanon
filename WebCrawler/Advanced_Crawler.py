@@ -1,10 +1,26 @@
 # Requires Tor running on localhost:9050
 # - Async crawling using httpx
-# - Rotating user-agents and headers
-# - Rotating proxies with health checks
+# - Rotating Random user-agents and headers
+# - Rotating proxies with health/validity checks
 # - Gaussian delay strategy
 # - Selenium integration for dynamic content and real browser behavior
+# ADDITIONAL FEATURES:
+# - Circuit rotation for Tor
+# - Enhanced data extraction with BeautifulSoup
+# - JSON output for structured results
+# - Support for both static and dynamic content scraping
+# - Improved error handling and retry logic
+# - Modular design for easy extension and maintenance
+# - Support for both Selenium and httpx based crawling
+# - Enhanced logging and debugging capabilities
 
+# ENSURE PACKAGES EXIST!!!
+# py -m pip install selenium beautifulsoup4 requests numpy stem fake_useragent 
+# py -m pip install --upgrade "httpx[socks]"
+
+# NOTES:
+# Need to make sure the torrc is set correctly to allow control port access
+# and that the Tor service is running with the control port enabled or circuit rotation will not work.
 
 import asyncio
 import httpx
@@ -16,6 +32,7 @@ import json
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
+from fake_useragent import UserAgent
 #print("[DEBUG] Using httpx version:", httpx.__version__)
 #print("[DEBUG] httpx module loaded from:", httpx.__file__)
 
@@ -35,13 +52,22 @@ import numpy as np
 # Swap between httpx and Selenium. If you want to use Selenium, set this to True, otherwise False for httpx
 SELENIUM_CRAWL = False 
 
+# Tor control port and password (if set)
+TOR_CONTROL_PORT = 9051  # Default Tor control port  
+TOR_PASSWORD = False     # Set to your Tor control password if required
+THE_PASSWORD = "password"  
+
 # Maximum number of retries for failed requests
 MAX_RETRIES = 3
 
+# Frequency to rotate circuits
+ROTATE_FREQUENCY = 2
+
 # List of proxies (SOCKS5)
-PROXIES = ["socks5h://127.0.0.1:9050"]#fetch_proxies()
+PROXIES = ["socks5h://127.0.0.1:9050"] #fetch_proxies()
  
 # User-Agent and header rotation pool
+# This can help avoid detection by making requests appear to come from different browsers
 HEADERS_POOL = [
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
@@ -60,6 +86,24 @@ HEADERS_POOL = [
     }
 ]
 
+# List of languages to rotate through
+# This can help avoid detection by making requests appear to come from different locales
+ACCEPT_LANGUAGES = [
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.8",
+    "fr-FR,fr;q=0.9",
+    "de-DE,de;q=0.8",
+]
+
+# List of referers to rotate through
+# This can help avoid detection by making requests appear to come from different sources
+REFERERS = [
+    "https://www.google.com",
+    "https://www.bing.com",
+    "https://duckduckgo.com",
+    "https://www.yahoo.com",
+]
+
 # Target URLs to crawl
 URLS_TO_CRAWL = [
     "https://example.com",
@@ -72,6 +116,15 @@ URLS_TO_CRAWL = [
 CHROME_DRIVER_PATH = "C:\\Repos\\chromedriver-win64\\chromedriver.exe"  #This is machine dependent!! Change this path to location of install
 
 # ==================== UTILITIES ====================
+
+def fetch_user_agent() -> str:
+    """
+    Fetches a random User-Agent string from the fake_useragent library.
+    Returns:
+        str: A random User-Agent string.
+    """
+    ua = UserAgent()
+    return ua.random
  
 def fetch_proxies(limit=100):
     """
@@ -126,9 +179,25 @@ async def test_proxy(proxy: str) -> bool:
             "http": proxy,
             "https": proxy
         }, timeout=10)
-        print("Proxy is working!")
-        print("Tor IP:", response.json()["origin"])
-        return True
+
+        # Check if response is JSON
+        content_type = response.headers.get('content-type', '')
+        if 'application/json' not in content_type:
+            print(f"Proxy {proxy} returned non-JSON response: {response.text[:100]}")
+            return False
+        
+        # Try parsing JSON
+        try:
+            json_data = response.json()
+            origin_ip = json_data.get('ip') or json_data.get('origin')
+            if not origin_ip:
+                print(f"Proxy {proxy} response lacks IP field: {json_data}")
+                return False
+            print(f"Proxy {proxy} is working. Origin IP: {origin_ip}")
+            return True
+        except ValueError as e:
+            print(f"Proxy {proxy} JSON parsing failed: {str(e)}. Response: {response.text[:100]}")
+            return False
     except Exception as e:
         print("Proxy test failed:", e)
         return False
@@ -177,7 +246,7 @@ def selenium_delay(mean=3.0, stddev=1.0):
     print(f"Delay: {delay:.2f}s")
     time.sleep(delay)
 
-def rotate_tor_circuit(self) -> bool:
+def rotate_tor_circuit() -> bool:
     """
     Rotate the Tor circuit by sending a NEWNYM signal to the Tor control port.
         
@@ -185,9 +254,9 @@ def rotate_tor_circuit(self) -> bool:
         bool: True if rotation was successful, False otherwise.
     """
     try:
-        with Controller.from_port(port=self.config.tor_control_port) as controller:
-            if self.config.tor_control_password:
-                controller.authenticate(password=self.config.tor_control_password)
+        with Controller.from_port(port=9051) as controller:
+            if TOR_PASSWORD:
+                controller.authenticate(password=THE_PASSWORD)
             else:
                 controller.authenticate()
             controller.signal(Signal.NEWNYM)
@@ -257,7 +326,7 @@ def selenium_crawl(url, proxy, user_agent)-> Optional[Dict]:
         word_count = len(visible_text.split())
                 
         # Scripts
-        scripts = [script.get('src') or script.get_text(strip=True) for script in soup.find_all('script')]
+        #scripts = [script.get('src') or script.get_text(strip=True) for script in soup.find_all('script')]
                 
         result = {
                     'url': url,
@@ -274,8 +343,8 @@ def selenium_crawl(url, proxy, user_agent)-> Optional[Dict]:
                     'og_data': og_data,
                     'twitter_data': twitter_data,
                     'html_size': html_size,
-                    'word_count': word_count,
-                    'scripts': scripts
+                    'word_count': word_count
+                    #'scripts': scripts
         }
         print(f"Successfully fetched {url} | Proxy: {proxy} | Title: {title}")
         return result
@@ -285,15 +354,16 @@ def selenium_crawl(url, proxy, user_agent)-> Optional[Dict]:
     finally:
         driver.quit()
 
-async def fetch(url: str, theproxy: str, headers: dict, attempt: int = 0) -> Optional[Dict]:
+async def httpx_crawl(url: str, theproxy: str, headers: dict, attempt: int = 0) -> Optional[Dict]:
     """
     Sends an HTTP GET request through a proxy with randomized headers using httpx (async).
-    Extracts page title and number of quote/author elements (for demo purposes).
+    Extracts page data/elements (for demo purposes).
     Args:
         url (str): The target webpage URL.
-        theproxy (str): Proxy string (e.g., "socks5h://127.0.0.1:9050").
-        headers (dict): Custom headers to use, such as User-Agent and Referer.
+        theproxy (str): Proxy string.
+        headers (dict): Custom headers to use.
     """
+
     try:
         async with httpx.AsyncClient(proxy=theproxy, headers=headers, timeout=10) as client:
             r = await client.get(url)
@@ -339,7 +409,7 @@ async def fetch(url: str, theproxy: str, headers: dict, attempt: int = 0) -> Opt
             word_count = len(visible_text.split())
                 
             # Scripts
-            scripts = [script.get('src') or script.get_text(strip=True) for script in soup.find_all('script')]
+            #scripts = [script.get('src') or script.get_text(strip=True) for script in soup.find_all('script')]
                 
             result = {
                     'url': url,
@@ -357,8 +427,8 @@ async def fetch(url: str, theproxy: str, headers: dict, attempt: int = 0) -> Opt
                     'og_data': og_data,
                     'twitter_data': twitter_data,
                     'html_size': html_size,
-                    'word_count': word_count,
-                    'scripts': scripts
+                    'word_count': word_count
+                    #'scripts': scripts
             }
 
             print(f"Successfully fetched {url} | Proxy: {theproxy} | Title: {title}")
@@ -367,7 +437,7 @@ async def fetch(url: str, theproxy: str, headers: dict, attempt: int = 0) -> Opt
         if attempt < MAX_RETRIES:
             print(f"Retrying {url} with proxy {theproxy} due to error: {e}")
             await gaussian_delay()
-            return await fetch(url, theproxy, headers, attempt + 1)
+            return await httpx_crawl(url, theproxy, headers, attempt + 1)
         print(f"Failed to fetch {url} after {MAX_RETRIES} via {theproxy}: {e}")
         return None
 
@@ -380,23 +450,30 @@ async def crawl(urls: list):
         urls (list): List of target URLs to process.
     """
     results = []
+    request_count = 0
     working_proxies = await get_working_proxies()
     if not working_proxies:
         print("No working proxies found.")
         return
 
     for url in urls:
-        # Rotate Tor circuit for each URL
-        #rotate_tor_circuit()  
-
+        # Rotate Tor circuit after a certain number of requests
+        request_count += 1
+        if request_count % ROTATE_FREQUENCY == 0:
+            rotate_tor_circuit()
+           
         proxy = random.choice(working_proxies)
-        headers = random.choice(HEADERS_POOL)
-        #SELENIUM_CRAWL = True  # Set to True to use Selenium, False for httpx
+        headers = {
+           "User-Agent": fetch_user_agent(),
+           "Accept-Language": random.choice(ACCEPT_LANGUAGES),
+           "Referer": random.choice(REFERERS)
+           }
+    
         if SELENIUM_CRAWL:
             result = selenium_crawl(url, proxy, headers["User-Agent"])
             selenium_delay()
         else:
-            result = await fetch(url, proxy, headers)
+            result = await httpx_crawl(url, proxy, headers)
             await gaussian_delay()
         if result:
             results.append(result)
@@ -404,8 +481,6 @@ async def crawl(urls: list):
     with open('crawl_results.json', 'w') as f:
             json.dump(results, f, indent=2)
     print(f"Saved {len(results)} results to crawl_results.json")
-
-
 
 # ==================== ENTRY POINT ====================
 
