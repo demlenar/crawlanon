@@ -1,7 +1,8 @@
 # Create a version of the crawler that rotates through a list of proxies
 # ENSURE PACKAGES EXIST!!!
-# py -m pip install selenium beautifulsoup4 requests numpy
+# py -m pip install selenium beautifulsoup4 requests numpy stem fake_useragent 
 # py -m pip install --upgrade "httpx[socks]"
+# py -m pip install stem
 #===================== LOOK UP =======================
 
 from selenium import webdriver

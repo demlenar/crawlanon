@@ -5,14 +5,15 @@
 # - Gaussian delay strategy
 # - Selenium integration for dynamic content and real browser behavior
 # ADDITIONAL FEATURES:
+# - Async to reduce latency/time
 # - Circuit rotation for Tor
 # - Enhanced data extraction with BeautifulSoup
-# - JSON output for structured results
-# - Support for both static and dynamic content scraping
+# - JSON output to view results
 # - Improved error handling and retry logic
 # - Modular design for easy extension and maintenance
 # - Support for both Selenium and httpx based crawling
-# - Enhanced logging and debugging capabilities
+# -     Benefits both static and dynamic content scraping
+# - Enhanced logging/debugging 
 
 # ENSURE PACKAGES EXIST!!!
 # py -m pip install selenium beautifulsoup4 requests numpy stem fake_useragent 
@@ -126,7 +127,7 @@ def fetch_user_agent() -> str:
     ua = UserAgent()
     return ua.random
  
-def fetch_proxies(limit=100):
+def fetch_proxies(limit=20):
     """
     Scrapes free HTTPS proxies from a public proxy listing website.
     Filters only HTTPS proxies and returns a list of IP:Port strings.
@@ -487,6 +488,6 @@ async def crawl(urls: list):
 if __name__ == "__main__":
     hostname = socket.gethostname()
     ip_address = socket.gethostbyname(hostname)
-    print(f"Your Local IP Address is: {ip_address}")
+    #print(f"Your Local IP Address is: {ip_address}")
     asyncio.run(crawl(URLS_TO_CRAWL))
 
